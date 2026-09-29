@@ -130,6 +130,11 @@ The loader supports two modes, selected via `--model-loader-extra-config`:
   asks the daemon to release its cache. Use this when the daemon should free
   GPU memory after handing off, at the cost of a full copy per restart.
 
+EPLB is supported with `copy` mode. EPLB rearranges expert weights in place,
+so it cannot share the daemon's allocations through `zero_copy`. A copy-mode
+handoff releases the daemon cache, so preload again before starting another
+EPLB engine.
+
 !!! warning
     In `zero_copy` mode the weights live in the daemon's CUDA IPC allocations,
     so [sleep mode](sleep_mode.md) (CuMemAllocator weight offloading) must not

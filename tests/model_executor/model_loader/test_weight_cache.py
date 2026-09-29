@@ -354,3 +354,54 @@ def test_weight_cache_key_distinguishes_dp_ranks():
     assert key.mismatched_fields(replace(key, dp_rank=4)) == ["dp_rank"]
     assert key.mismatched_fields(replace(key, dp_size=8, dp_rank=3)) == ["dp_size"]
     assert key.mismatched_fields(replace(key, pp_rank=0)) == ["pp_rank"]
+
+
+def test_weight_cache_key_distinguishes_ep_and_eplb_layouts():
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from vllm.config.parallel import EPLBConfig
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
+        _validate_eplb_mode,
+    )
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheKey,
+        get_eplb_config_hash,
+    )
+
+    key = WeightCacheKey(
+        checkpoint="ckpt",
+        model_arch="Arch",
+        tp_size=2,
+        tp_rank=0,
+        dtype="bf16",
+        quantization=None,
+        quant_config_hash="h",
+        revision=None,
+        vllm_version="v",
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config_hash="eplb-a",
+    )
+    assert key.mismatched_fields(replace(key, enable_expert_parallel=False)) == [
+        "enable_expert_parallel"
+    ]
+    assert key.mismatched_fields(replace(key, enable_eplb=False)) == [
+        "enable_eplb"
+    ]
+    assert key.mismatched_fields(replace(key, eplb_config_hash="eplb-b")) == [
+        "eplb_config_hash"
+    ]
+    eplb_hash = get_eplb_config_hash(
+        SimpleNamespace(enable_eplb=True, eplb_config=EPLBConfig())
+    )
+    assert isinstance(eplb_hash, str)
+    assert eplb_hash
+    assert eplb_hash != get_eplb_config_hash(
+        SimpleNamespace(
+            enable_eplb=True, eplb_config=EPLBConfig(num_redundant_experts=1)
+        )
+    )
+    with pytest.raises(ValueError, match="requires.*copy"):
+        _validate_eplb_mode(SimpleNamespace(enable_eplb=True), "zero_copy")
+    _validate_eplb_mode(SimpleNamespace(enable_eplb=True), "copy")

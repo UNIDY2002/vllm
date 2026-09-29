@@ -104,6 +104,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     WeightCacheUnavailableError,
     check_ipc_quant_support,
     ensure_private_socket_dir,
+    get_eplb_config_hash,
     get_current_device_uuid,
     get_socket_path,
     recv_msg,
@@ -232,6 +233,9 @@ class WeightCacheDaemon:
             dp_size=self.dp_size,
             dp_rank=dp_rank,
             is_draft=is_draft,
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
+            enable_eplb=parallel_config.enable_eplb,
+            eplb_config_hash=get_eplb_config_hash(parallel_config),
         )
 
     def load_model(self) -> None:

@@ -7,6 +7,7 @@ import dataclasses
 import socket
 import time
 from copy import copy
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -35,6 +36,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
     check_ipc_quant_support,
     get_current_device_uuid,
+    get_eplb_config_hash,
     get_socket_path,
     recv_msg,
     send_msg,
@@ -49,6 +51,16 @@ logger = init_logger(__name__)
 _CONNECT_TIMEOUT_S = 5.0
 _STATE_TIMEOUT_S = 300.0
 _STARTUP_RETRY_INTERVAL_S = 0.5
+
+
+def _validate_eplb_mode(parallel_config: Any, mode: str) -> None:
+    if parallel_config.enable_eplb and mode != "copy":
+        raise ValueError(
+            "[weight_cache:engine] EPLB requires "
+            'model_loader_extra_config={"mode": "copy"}: EPLB rearranges '
+            "expert weights in place and cannot mutate the daemon's "
+            "zero-copy cache."
+        )
 
 
 class IpcModelLoader(BaseModelLoader):
@@ -139,6 +151,7 @@ class IpcModelLoader(BaseModelLoader):
         # An unsupported platform is a permanent misconfiguration rather than
         # a transient daemon outage, so it is raised even when fallback is on.
         check_ipc_platform_support()
+        _validate_eplb_mode(vllm_config.parallel_config, self.mode)
         state_fetched = False
         try:
             # Cross-check the routing flag against the identity of the model
@@ -289,8 +302,11 @@ class IpcModelLoader(BaseModelLoader):
             _register(alias_name, obj, isinstance(obj, nn.Parameter))
 
     def _fetch_entries(self, model_config: ModelConfig) -> WeightCacheState:
+        from vllm.config import get_current_vllm_config
+
         dp_group = get_dp_group()
         pp_group = get_pp_group()
+        parallel_config = get_current_vllm_config().parallel_config
         cache_config = WeightCacheKey.from_model_config(
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
@@ -300,6 +316,9 @@ class IpcModelLoader(BaseModelLoader):
             dp_size=dp_group.world_size,
             dp_rank=dp_group.rank_in_group,
             is_draft=self.is_draft,
+            enable_expert_parallel=parallel_config.enable_expert_parallel,
+            enable_eplb=parallel_config.enable_eplb,
+            eplb_config_hash=get_eplb_config_hash(parallel_config),
         )
         if not self.fallback:
             return self._request_state_with_startup_wait(cache_config)
