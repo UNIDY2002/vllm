@@ -213,11 +213,6 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
-    if case is QWEN_EP_CASE:
-        import torch
-
-        if torch.cuda.device_count() < 2:
-            pytest.skip("Qwen3 EP IPC weight cache requires two GPUs")
 
     # Baseline: plain disk loading with the default loader.
     baseline_outputs = generate(
@@ -227,10 +222,6 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
         fallback=True,
     )
     assert all(text for _, texts in baseline_outputs for text in texts)
-    if case is QWEN_EP_CASE:
-        assert any(
-            "paris" in text.lower() for _, texts in baseline_outputs for text in texts
-        )
 
     # Cold start: no daemon is serving, so the loader falls back to disk.
     with tempfile.TemporaryDirectory(prefix="vllm_ipc_empty_") as empty_socket_dir:

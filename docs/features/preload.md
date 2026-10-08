@@ -130,10 +130,6 @@ The loader supports two modes, selected via `--model-loader-extra-config`:
   asks the daemon to release its cache. Use this when the daemon should free
   GPU memory after handing off, at the cost of a full copy per restart.
 
-Static expert parallelism is supported. Use the same parallel sizes,
-`--enable-expert-parallel`, and `--expert-placement-strategy` for preload and
-serving. EPLB is unsupported in both loader modes.
-
 !!! warning
     In `zero_copy` mode the weights live in the daemon's CUDA IPC allocations,
     so [sleep mode](sleep_mode.md) (CuMemAllocator weight offloading) must not
