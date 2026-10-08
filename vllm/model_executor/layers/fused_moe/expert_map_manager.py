@@ -440,6 +440,8 @@ class ExpertMapManager:
 
     def _calculate_expert_maps(self) -> None:
         """Calculate expert mappings based on placement strategy."""
+        # IPC loading constructs the model on meta. Keep host-readable maps
+        # for loading and logging, and device maps for the forward kernels.
         with torch.device("cpu"):
             (
                 self._local_num_experts,

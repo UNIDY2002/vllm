@@ -4,8 +4,60 @@
 import pytest
 
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+    ExpertMapManager,
     determine_expert_map,
 )
+
+
+@pytest.mark.parametrize("device", ["cpu", "meta"])
+@pytest.mark.parametrize("placement", ["linear", "round_robin"])
+@pytest.mark.parametrize("rank", [0, 1])
+def test_expert_map_manager_host_queries(device, placement, rank):
+    """IPC meta construction must retain usable host expert mappings."""
+    from types import SimpleNamespace
+
+    import torch
+
+    parallel_config = SimpleNamespace(
+        use_ep=True,
+        ep_size=2,
+        ep_rank=rank,
+        use_all2all_kernels=False,
+        needs_round_robin_routing_tables=False,
+    )
+    with torch.device(device):
+        manager = ExpertMapManager(
+            max_num_batched_tokens=16,
+            top_k=2,
+            global_num_experts=9,
+            num_redundant_experts=0,
+            num_expert_group=2,
+            moe_parallel_config=parallel_config,
+            placement_strategy=placement,
+            enable_eplb=False,
+        )
+        local_ids = manager.get_local_expert_ids()
+        expected_ids = (
+            (list(range(0, 5)) if rank == 0 else list(range(5, 9)))
+            if placement == "linear"
+            else list(range(rank, 9, 2))
+        )
+        assert local_ids == expected_ids
+        assert manager.local_num_experts == len(expected_ids)
+        assert manager.expert_map.device.type == device
+        for expert_id in range(9):
+            assert manager.is_local_expert(expert_id) == (expert_id in expected_ids)
+            expected_local = (
+                expected_ids.index(expert_id) if expert_id in expected_ids else -1
+            )
+            assert manager.map_global_to_local(expert_id) == expected_local
+        assert manager.get_compressed_map_string() == ", ".join(
+            f"{i}->{expert_id}" for i, expert_id in enumerate(expected_ids)
+        )
+        if device == "cpu":
+            assert manager.expert_map.tolist() == [
+                expected_ids.index(i) if i in expected_ids else -1 for i in range(9)
+            ]
 
 
 def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts):

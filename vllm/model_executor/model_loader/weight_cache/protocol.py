@@ -19,7 +19,7 @@ import socket
 import stat
 import struct
 import tempfile
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass, fields
 from typing import Any, NamedTuple
 
 import torch
@@ -296,8 +296,7 @@ class WeightCacheKey:
     dp_size: int = 1
     dp_rank: int = 0
     enable_expert_parallel: bool = False
-    enable_eplb: bool = False
-    eplb_config_hash: str = ""
+    expert_placement_strategy: str = "linear"
 
     @classmethod
     def from_model_config(
@@ -312,8 +311,7 @@ class WeightCacheKey:
         dp_size: int = 1,
         dp_rank: int = 0,
         enable_expert_parallel: bool = False,
-        enable_eplb: bool = False,
-        eplb_config_hash: str = "",
+        expert_placement_strategy: str = "linear",
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -346,8 +344,7 @@ class WeightCacheKey:
             dp_size=dp_size,
             dp_rank=dp_rank,
             enable_expert_parallel=enable_expert_parallel,
-            enable_eplb=enable_eplb,
-            eplb_config_hash=eplb_config_hash,
+            expert_placement_strategy=expert_placement_strategy,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -356,16 +353,6 @@ class WeightCacheKey:
             for f in fields(self)
             if getattr(self, f.name) != getattr(other, f.name)
         ]
-
-
-def get_eplb_config_hash(parallel_config: Any) -> str:
-    """Fingerprint EPLB settings that determine the cached expert layout."""
-    if not parallel_config.enable_eplb:
-        return ""
-    return safe_hash(
-        json.dumps(asdict(parallel_config.eplb_config), sort_keys=True).encode(),
-        usedforsecurity=False,
-    ).hexdigest()
 
 
 @dataclass
