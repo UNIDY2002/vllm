@@ -77,13 +77,16 @@ cached and keep loading from disk in the engine.
 """
 
 import contextlib
+import ctypes
 import fcntl
 import gc
 import hmac
 import multiprocessing
 import os
 import socket
+import struct
 import threading
+import time
 from collections.abc import Callable
 
 import torch
@@ -103,6 +106,13 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_cache.artifact_cache import (
     ArtifactStore,
+)
+from vllm.model_executor.model_loader.weight_cache.compile_artifact_cache import (
+    CompileCacheManifest,
+    compile_cache_manifest_from_dict,
+    create_compile_cache_bundle,
+    get_default_compile_cache_roots,
+    install_compile_cache_bundle,
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
@@ -137,6 +147,41 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.v1.worker.workspace import init_workspace_manager
 
 logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
+
+
+def _send_bytes(conn: socket.socket, payload: bytes) -> None:
+    conn.sendall(struct.pack("!Q", len(payload)))
+    view = memoryview(payload)
+    while view:
+        sent = conn.send(view[: 1 << 20])
+        if sent <= 0:
+            raise ConnectionError("compile cache peer closed the connection")
+        view = view[sent:]
+
+
+def _recv_bytes(conn: socket.socket, size: int, *, deadline: float) -> bytes:
+    if size < 0 or size > 8 << 30:
+        raise ValueError("invalid compile cache payload size")
+    header = bytearray()
+    while len(header) < 8:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("timed out reading compile cache payload")
+        chunk = conn.recv(8 - len(header))
+        if not chunk:
+            raise ConnectionError("compile cache peer closed the connection")
+        header.extend(chunk)
+    announced = struct.unpack("!Q", header)[0]
+    if announced != size:
+        raise ValueError("compile cache payload size mismatch")
+    payload = bytearray()
+    while len(payload) < size:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("timed out reading compile cache payload")
+        chunk = conn.recv(min(1 << 20, size - len(payload)))
+        if not chunk:
+            raise ConnectionError("compile cache peer closed the connection")
+        payload.extend(chunk)
+    return bytes(payload)
 
 
 def export_entries(
@@ -200,6 +245,8 @@ class WeightCacheDaemon:
         artifact_source: tuple[str, int] | None = None,
         artifact_listen: tuple[str, int] | None = None,
         artifact_token: str | None = None,
+        compile_cache_backend: str = "none",
+        compile_cache_mooncake_protocol: str = "rdma",
     ):
         parallel_config = vllm_config.parallel_config
         if parallel_config.enable_eplb:
@@ -248,6 +295,22 @@ class WeightCacheDaemon:
         self.artifact_source = artifact_source
         self.artifact_listen = artifact_listen
         self.artifact_token = artifact_token
+        if compile_cache_backend not in ("none", "tcp", "mooncake"):
+            raise ValueError(
+                f"unsupported compile-cache backend: {compile_cache_backend!r}"
+            )
+        self.compile_cache_backend = compile_cache_backend
+        if compile_cache_mooncake_protocol not in ("tcp", "rdma"):
+            raise ValueError(
+                "unsupported Mooncake compile-cache protocol: "
+                f"{compile_cache_mooncake_protocol!r}"
+            )
+        self.compile_cache_mooncake_protocol = compile_cache_mooncake_protocol
+        self.compile_cache_roots = get_default_compile_cache_roots()
+        self.compile_cache_bundle: tuple[CompileCacheManifest, bytes] | None = None
+        # (TransferEngine, registered buffer address, buffer size, session,
+        # source buffer owner).
+        self._mooncake_source: tuple[object, int, int, str, object] | None = None
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
         self.cache_config = WeightCacheKey.from_model_config(
@@ -360,6 +423,111 @@ class WeightCacheDaemon:
                 error,
             )
 
+    def fetch_compile_cache(self) -> None:
+        """Install a validated compiled-cache bundle before model loading."""
+        if self.compile_cache_backend == "none" or self.artifact_source is None:
+            return
+        if not self.artifact_token:
+            raise ValueError("compile cache source requires an artifact token")
+        deadline = time.monotonic() + 300.0
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                self._fetch_compile_cache()
+                return
+            except (OSError, ConnectionError, ValueError, RuntimeError) as error:
+                last_error = error
+                time.sleep(1.0)
+        raise RuntimeError(
+            f"timed out fetching compile cache from {self.artifact_source}"
+        ) from last_error
+
+    def _fetch_compile_cache(self) -> None:
+        fetch_started = time.monotonic()
+        assert self.artifact_source is not None
+        with socket.create_connection(self.artifact_source, timeout=10.0) as sock:
+            send_json(
+                sock,
+                {
+                    "cmd": "fetch_compile_cache",
+                    "token": self.artifact_token,
+                },
+            )
+            response = recv_json(sock)
+            if not isinstance(response, dict) or response.get("status") != "ok":
+                raise RuntimeError(
+                    f"compile cache source refused request: {response!r}"
+                )
+            manifest = compile_cache_manifest_from_dict(response.get("manifest"))
+            bundle_size = response.get("bundle_size")
+            if not isinstance(bundle_size, int) or bundle_size < 0:
+                raise ValueError("invalid compile cache bundle size")
+            transport = response.get("transport", "tcp")
+            payload_started = time.monotonic()
+            if transport == "tcp":
+                bundle = _recv_bytes(
+                    sock, bundle_size, deadline=time.monotonic() + 300.0
+                )
+            elif transport == "mooncake":
+                bundle = self._fetch_compile_cache_mooncake(response, bundle_size)
+            else:
+                raise ValueError(f"unsupported compile-cache transport: {transport!r}")
+            payload_elapsed = time.monotonic() - payload_started
+        install_compile_cache_bundle(bundle, manifest, self.compile_cache_roots)
+        total_elapsed = time.monotonic() - fetch_started
+        logger.info(
+            "Weight cache %s daemon rank %d installed %d compiled-cache files "
+            "(%d bytes) in %.3f s (payload %.3f s)",
+            self.role,
+            self.global_rank,
+            len(manifest.entries),
+            manifest.total_size,
+            total_elapsed,
+            payload_elapsed,
+        )
+
+    def _fetch_compile_cache_mooncake(
+        self, response: dict[str, object], bundle_size: int
+    ) -> bytes:
+        session = response.get("session")
+        remote_address = response.get("address")
+        protocol = response.get("protocol", "rdma")
+        if (
+            not isinstance(session, str)
+            or not isinstance(remote_address, int)
+            or protocol not in ("tcp", "rdma")
+        ):
+            raise ValueError("malformed Mooncake compile-cache descriptor")
+        try:
+            from mooncake.engine import TransferEngine
+        except ImportError as error:
+            raise RuntimeError(
+                "Mooncake compile-cache backend requires mooncake.engine"
+            ) from error
+        from vllm.utils.network_utils import get_ip
+
+        engine = TransferEngine()
+        if engine.initialize(get_ip(), "P2PHANDSHAKE", protocol, "") != 0:
+            raise RuntimeError("Mooncake TransferEngine initialization failed")
+        local_buffer = ctypes.create_string_buffer(bundle_size)
+        local_address = ctypes.addressof(local_buffer)
+        try:
+            if engine.register_memory(local_address, bundle_size) != 0:
+                raise RuntimeError("Mooncake failed to register compile-cache buffer")
+            try:
+                status = engine.batch_transfer_sync_read(
+                    session, [local_address], [remote_address], [bundle_size]
+                )
+            finally:
+                engine.unregister_memory(local_address)
+            if status != 0:
+                raise RuntimeError(
+                    f"Mooncake compile-cache transfer failed with status {status}"
+                )
+            return local_buffer.raw[:bundle_size]
+        finally:
+            del local_buffer
+
     def load_model(self) -> None:
         torch.accelerator.set_device_index(self.local_rank)
         # Outside the config context so the daemon keeps its own rendezvous
@@ -441,11 +609,18 @@ class WeightCacheDaemon:
         os.chmod(socket_path, 0o600)
         server.listen()
         remote_server = None
-        if self.artifact_listen is not None:
-            family = (
-                socket.AF_INET6 if ":" in self.artifact_listen[0] else socket.AF_INET
-            )
-            remote_server = socket.create_server(self.artifact_listen, family=family)
+        remote_listen = self.artifact_listen
+        if remote_listen is not None:
+            if self.compile_cache_backend != "none":
+                self.compile_cache_bundle = create_compile_cache_bundle(
+                    self.compile_cache_roots
+                )
+                logger.info(
+                    "Prepared compiled-cache bundle with %d bytes",
+                    len(self.compile_cache_bundle[1]),
+                )
+            family = socket.AF_INET6 if ":" in remote_listen[0] else socket.AF_INET
+            remote_server = socket.create_server(remote_listen, family=family)
             threading.Thread(
                 target=self._serve_artifact_remote,
                 args=(remote_server,),
@@ -510,9 +685,9 @@ class WeightCacheDaemon:
                             },
                         )
                         continue
-                    if (
-                        not isinstance(request, dict)
-                        or request.get("cmd") != "fetch_artifacts"
+                    if not isinstance(request, dict) or request.get("cmd") not in (
+                        "fetch_artifacts",
+                        "fetch_compile_cache",
                     ):
                         send_json(
                             conn,
@@ -522,12 +697,82 @@ class WeightCacheDaemon:
                             },
                         )
                         continue
-                    send_json(
-                        conn, {"status": "ok", "artifacts": self.artifacts.to_json()}
-                    )
-                except (OSError, ConnectionError, ValueError) as e:
+                    if request["cmd"] == "fetch_artifacts":
+                        send_json(
+                            conn,
+                            {
+                                "status": "ok",
+                                "artifacts": self.artifacts.to_json(),
+                            },
+                        )
+                    else:
+                        if self.compile_cache_bundle is None:
+                            raise RuntimeError("compiled-cache bundle is not ready")
+                        manifest, bundle = self.compile_cache_bundle
+                        if self.compile_cache_backend == "tcp":
+                            send_json(
+                                conn,
+                                {
+                                    "status": "ok",
+                                    "manifest": manifest.as_dict(),
+                                    "bundle_size": len(bundle),
+                                    "transport": "tcp",
+                                },
+                            )
+                            _send_bytes(conn, bundle)
+                        else:
+                            self._ensure_mooncake_source(bundle)
+                            assert self._mooncake_source is not None
+                            _, address, _, session, _ = self._mooncake_source
+                            send_json(
+                                conn,
+                                {
+                                    "status": "ok",
+                                    "manifest": manifest.as_dict(),
+                                    "bundle_size": len(bundle),
+                                    "transport": "mooncake",
+                                    "protocol": self.compile_cache_mooncake_protocol,
+                                    "address": address,
+                                    "session": session,
+                                },
+                            )
+                except (OSError, ConnectionError, RuntimeError, ValueError) as e:
                     with contextlib.suppress(OSError):
                         send_json(conn, {"status": "error", "message": str(e)})
+
+    def _ensure_mooncake_source(self, bundle: bytes) -> None:
+        if self._mooncake_source is not None:
+            return
+        try:
+            from mooncake.engine import TransferEngine
+        except ImportError as error:
+            raise RuntimeError(
+                "Mooncake compile-cache backend requires mooncake.engine"
+            ) from error
+        from vllm.utils.network_utils import get_ip
+
+        engine = TransferEngine()
+        if (
+            engine.initialize(
+                get_ip(),
+                "P2PHANDSHAKE",
+                self.compile_cache_mooncake_protocol,
+                "",
+            )
+            != 0
+        ):
+            raise RuntimeError("Mooncake TransferEngine initialization failed")
+        source_buffer = ctypes.create_string_buffer(bundle)
+        address = ctypes.addressof(source_buffer)
+        if engine.register_memory(address, len(bundle)) != 0:
+            raise RuntimeError("Mooncake failed to register compile-cache buffer")
+        self._mooncake_source = (
+            engine,
+            address,
+            len(bundle),
+            f"{get_ip()}:{engine.get_rpc_port()}",
+            source_buffer,
+        )
 
     def _acquire_gpu_lock(self, socket_path: str) -> int:
         """Take an exclusive lock guarding this GPU's socket path.
@@ -630,6 +875,8 @@ def _run_daemon(
     artifact_source: tuple[str, int] | None = None,
     artifact_listen: tuple[str, int] | None = None,
     artifact_token: str | None = None,
+    compile_cache_backend: str = "none",
+    compile_cache_mooncake_protocol: str = "rdma",
 ) -> None:
     daemon = WeightCacheDaemon(
         vllm_config,
@@ -643,7 +890,10 @@ def _run_daemon(
         artifact_source,
         artifact_listen,
         artifact_token,
+        compile_cache_backend,
+        compile_cache_mooncake_protocol,
     )
+    daemon.fetch_compile_cache()
     daemon.load_model()
     daemon.warmup()
     daemon.serve_forever(

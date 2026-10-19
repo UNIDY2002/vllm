@@ -176,6 +176,20 @@ class PreloadSubcommand(CLISubcommand):
             help="Shared secret for remote autotune-artifact requests. "
             "The JSON connection is unencrypted; use a trusted network.",
         )
+        parser.add_argument(
+            "--weight-cache-compile-cache-backend",
+            choices=("none", "tcp", "mooncake"),
+            default="none",
+            help="Data-plane backend for compiled-cache transfer over the "
+            "artifact endpoint (default: none).",
+        )
+        parser.add_argument(
+            "--weight-cache-compile-cache-mooncake-protocol",
+            choices=("tcp", "rdma"),
+            default="rdma",
+            help="TransferEngine protocol for the Mooncake compile-cache "
+            "backend (default: rdma).",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -221,9 +235,9 @@ class PreloadSubcommand(CLISubcommand):
             args.weight_cache_artifact_source_host,
             args.weight_cache_artifact_source_port,
         )
-        if any(value is not None for value in (*listen_args, *source_args)) and (
-            not args.weight_cache_artifact_token
-        ):
+        if (
+            any(value is not None for value in (*listen_args, *source_args))
+        ) and not args.weight_cache_artifact_token:
             raise ValueError(
                 "Artifact listener/source requires --weight-cache-artifact-token"
             )
@@ -261,7 +275,6 @@ class PreloadSubcommand(CLISubcommand):
                 raise ValueError(
                     f"Artifact port must be between 1 and 65535, got {port}"
                 )
-
         placements = plan_local_ranks(parallel_config)
         local_world_size = len(placements)
         if dp_size == 1:
@@ -380,6 +393,10 @@ class PreloadSubcommand(CLISubcommand):
                         else None
                     ),
                     "artifact_token": args.weight_cache_artifact_token,
+                    "compile_cache_backend": args.weight_cache_compile_cache_backend,
+                    "compile_cache_mooncake_protocol": (
+                        args.weight_cache_compile_cache_mooncake_protocol
+                    ),
                 },
                 name=(
                     f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
