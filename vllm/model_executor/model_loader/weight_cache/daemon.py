@@ -242,9 +242,9 @@ class WeightCacheDaemon:
         is_draft: bool = False,
         dp_rank: int = 0,
         pp_rank: int = 0,
-        artifact_source: tuple[str, int] | None = None,
-        artifact_listen: tuple[str, int] | None = None,
-        artifact_token: str | None = None,
+        seed_source: tuple[str, int] | None = None,
+        seed_listen: tuple[str, int] | None = None,
+        seed_token: str | None = None,
         compile_cache_backend: str = "none",
         compile_cache_mooncake_protocol: str = "rdma",
     ):
@@ -292,9 +292,9 @@ class WeightCacheDaemon:
         self.model: torch.nn.Module | None = None
         key_dp_size, key_dp_rank = get_engine_dp_placement(vllm_config, dp_rank)
         self.artifacts = ArtifactStore()
-        self.artifact_source = artifact_source
-        self.artifact_listen = artifact_listen
-        self.artifact_token = artifact_token
+        self.seed_source = seed_source
+        self.seed_listen = seed_listen
+        self.seed_token = seed_token
         if compile_cache_backend not in ("none", "tcp", "mooncake"):
             raise ValueError(
                 f"unsupported compile-cache backend: {compile_cache_backend!r}"
@@ -367,7 +367,7 @@ class WeightCacheDaemon:
 
     @property
     def _uses_remote_artifacts(self) -> bool:
-        return self.artifact_source is not None or self.artifact_listen is not None
+        return self.seed_source is not None or self.seed_listen is not None
 
     def _load_remote_autotune_artifact(self, runner, *, skip_attn: bool) -> None:
         key = flashinfer_autotune_artifact_key(
@@ -393,17 +393,17 @@ class WeightCacheDaemon:
 
     def fetch_artifacts(self) -> None:
         """Best-effort import of autotune artifacts from another daemon."""
-        if self.artifact_source is None:
+        if self.seed_source is None:
             return
-        if not self.artifact_token:
+        if not self.seed_token:
             raise ValueError("artifact source requires an artifact token")
         try:
-            with socket.create_connection(self.artifact_source, timeout=30.0) as sock:
+            with socket.create_connection(self.seed_source, timeout=30.0) as sock:
                 send_json(
                     sock,
                     {
                         "cmd": "fetch_artifacts",
-                        "token": self.artifact_token,
+                        "token": self.seed_token,
                     },
                 )
                 response = recv_json(sock)
@@ -419,15 +419,15 @@ class WeightCacheDaemon:
         except (OSError, ConnectionError, ValueError, RuntimeError) as error:
             logger.warning(
                 "Cannot fetch autotune artifacts from %s; using local warmup: %s",
-                self.artifact_source,
+                self.seed_source,
                 error,
             )
 
     def fetch_compile_cache(self) -> None:
         """Install a validated compiled-cache bundle before model loading."""
-        if self.compile_cache_backend == "none" or self.artifact_source is None:
+        if self.compile_cache_backend == "none" or self.seed_source is None:
             return
-        if not self.artifact_token:
+        if not self.seed_token:
             raise ValueError("compile cache source requires an artifact token")
         deadline = time.monotonic() + 300.0
         last_error: Exception | None = None
@@ -439,18 +439,18 @@ class WeightCacheDaemon:
                 last_error = error
                 time.sleep(1.0)
         raise RuntimeError(
-            f"timed out fetching compile cache from {self.artifact_source}"
+            f"timed out fetching compile cache from {self.seed_source}"
         ) from last_error
 
     def _fetch_compile_cache(self) -> None:
         fetch_started = time.monotonic()
-        assert self.artifact_source is not None
-        with socket.create_connection(self.artifact_source, timeout=10.0) as sock:
+        assert self.seed_source is not None
+        with socket.create_connection(self.seed_source, timeout=10.0) as sock:
             send_json(
                 sock,
                 {
                     "cmd": "fetch_compile_cache",
-                    "token": self.artifact_token,
+                    "token": self.seed_token,
                 },
             )
             response = recv_json(sock)
@@ -609,7 +609,7 @@ class WeightCacheDaemon:
         os.chmod(socket_path, 0o600)
         server.listen()
         remote_server = None
-        remote_listen = self.artifact_listen
+        remote_listen = self.seed_listen
         if remote_listen is not None:
             if self.compile_cache_backend != "none":
                 self.compile_cache_bundle = create_compile_cache_bundle(
@@ -673,9 +673,9 @@ class WeightCacheDaemon:
                         request.get("token") if isinstance(request, dict) else None
                     )
                     if (
-                        not self.artifact_token
+                        not self.seed_token
                         or not isinstance(presented, str)
-                        or not hmac.compare_digest(presented, self.artifact_token)
+                        or not hmac.compare_digest(presented, self.seed_token)
                     ):
                         send_json(
                             conn,
@@ -872,9 +872,9 @@ def _run_daemon(
     is_draft: bool = False,
     dp_rank: int = 0,
     pp_rank: int = 0,
-    artifact_source: tuple[str, int] | None = None,
-    artifact_listen: tuple[str, int] | None = None,
-    artifact_token: str | None = None,
+    seed_source: tuple[str, int] | None = None,
+    seed_listen: tuple[str, int] | None = None,
+    seed_token: str | None = None,
     compile_cache_backend: str = "none",
     compile_cache_mooncake_protocol: str = "rdma",
 ) -> None:
@@ -887,9 +887,9 @@ def _run_daemon(
         is_draft,
         dp_rank,
         pp_rank,
-        artifact_source,
-        artifact_listen,
-        artifact_token,
+        seed_source,
+        seed_listen,
+        seed_token,
         compile_cache_backend,
         compile_cache_mooncake_protocol,
     )
