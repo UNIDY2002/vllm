@@ -431,7 +431,7 @@ def test_mxfp8_linear_emulation_bf16_at_load(
     layer.weight = torch.nn.Parameter(w_fp8.clone(), requires_grad=False)
     layer.weight_scale = torch.nn.Parameter(w_scale.clone(), requires_grad=False)
 
-    kernel = EmulationMxfp8LinearKernel(Mxfp8LinearLayerConfig())
+    kernel = EmulationMxfp8LinearKernel(Mxfp8LinearLayerConfig(weight_shape=(N, K)))
     kernel.process_weights_after_loading(layer)
 
     if dequant_at_load:
@@ -482,7 +482,9 @@ def test_mxfp8_rocm_native_unaligned_k_dequantizes_at_load(shape):
         layer.weight_scale = torch.nn.Parameter(w_scale.clone(), requires_grad=False)
         return layer
 
-    kernel = rocm_native.RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig())
+    kernel = rocm_native.RocmDotScaledMxfp8LinearKernel(
+        Mxfp8LinearLayerConfig(weight_shape=(N, K))
+    )
     layer = make_layer()
     kernel.process_weights_after_loading(layer)
     assert (layer.weight.element_size() >= 2) is not aligned
@@ -605,7 +607,8 @@ def test_routed_experts_expert_map_delegates_to_kernel():
             expert_mask=mask,
             quant_method=SimpleNamespace(moe_kernel=moe_kernel),
         )
-        return RoutedExperts.expert_map.fget(layer)
+        # mypy types a property read on the class as its getter function.
+        return RoutedExperts.expert_map.fget(layer)  # type: ignore[attr-defined]
 
     assert torch.equal(resolve(True), mask)  # AITER kernel -> 0/1 mask
     assert torch.equal(resolve(False), canonical)  # non-AITER -> canonical map

@@ -19,29 +19,37 @@ import socket
 import stat
 import struct
 import tempfile
-from dataclasses import dataclass, fields
-from typing import Any
+from dataclasses import asdict, dataclass, fields
+from typing import Any, NamedTuple, TypeVar
 
 import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 import vllm.version
-from vllm.config import ModelConfig
+from vllm.config import CacheConfig, ModelConfig
+from vllm.config.utils import normalize_value
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.weight_cache.utils import (
+    format_socket_role_suffix,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
 )
 from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
-SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}.sock"
+SOCKET_NAME_TEMPLATE = "vllm_weight_cache_{gpu_uuid}{role}.sock"
 SOCKET_DIR_TEMPLATE = "vllm_weight_cache_{uid}"
 
 _LEN_STRUCT = struct.Struct("!Q")
 # Sanity bound for a single message. IPC handles are tiny; only small
 # non-CUDA tensors are ever shipped by value.
 MAX_MSG_SIZE = 1 << 34
+MAX_ARTIFACT_SIZE = 64 << 20
+MAX_JSON_MSG_SIZE = 1 << 26
+
+_DataclassT = TypeVar("_DataclassT")
 
 
 def _current_uid() -> int:
@@ -63,6 +71,15 @@ class UnsupportedQuantForIPCError(Exception):
 
 class UnsupportedPlatformForIPCError(Exception):
     """Raised when the current platform cannot share CUDA IPC handles."""
+
+
+@dataclass(frozen=True)
+class ArtifactCacheKey:
+    """Exact identity of a host-side artifact."""
+
+    kind: str
+    content_hash: str
+    vllm_version: str = vllm.version.__version__
 
 
 def check_ipc_platform_support() -> None:
@@ -128,9 +145,23 @@ def get_socket_dir(socket_dir: str | None = None) -> str:
     )
 
 
-def get_socket_path(gpu_uuid: str, socket_dir: str | None = None) -> str:
-    directory = get_socket_dir(socket_dir)
-    return os.path.join(directory, SOCKET_NAME_TEMPLATE.format(gpu_uuid=gpu_uuid))
+def get_socket_path(
+    gpu_uuid: str,
+    socket_dir: str | None = None,
+    *,
+    is_draft: bool = False,
+) -> str:
+    """Socket path of a daemon group; ``is_draft=False`` is the target.
+
+    The GPU uuid is hashed to keep the name well under the AF_UNIX path
+    limit (~108 bytes) even with the draft role suffix.
+    """
+    gpu_id = safe_hash(gpu_uuid.encode()).hexdigest()
+    name = SOCKET_NAME_TEMPLATE.format(
+        gpu_uuid=gpu_id,
+        role=format_socket_role_suffix(is_draft),
+    )
+    return os.path.join(get_socket_dir(socket_dir), name)
 
 
 def ensure_private_socket_dir(directory: str, strict_perms: bool = True) -> None:
@@ -210,12 +241,39 @@ def verify_peer_is_owner(conn: socket.socket) -> None:
         raise PermissionError(f"Rejecting weight cache connection from uid {peer_uid}")
 
 
-def _hash_quant_config(quant_config: Any) -> str:
-    if quant_config is None:
-        return ""
+def _hash_quant_config(quant_config: Any, runtime_quant_config: Any = None) -> str:
     if hasattr(quant_config, "to_dict"):
         quant_config = quant_config.to_dict()
-    payload = json.dumps(quant_config, sort_keys=True, default=str)
+    payload = json.dumps(
+        {
+            "checkpoint": quant_config,
+            "runtime": normalize_value(runtime_quant_config),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
+
+
+def hash_rope_parameters(model_config: ModelConfig) -> str:
+    """Fingerprint the text RoPE parameters used to construct cached buffers."""
+
+    def normalize_numbers(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: normalize_numbers(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [normalize_numbers(item) for item in value]
+        # JSON distinguishes 10000 from 10000.0, but RoPE does not.
+        return int(value) if isinstance(value, float) and value.is_integer() else value
+
+    text_config = model_config.hf_text_config
+    parameters = {
+        "rope_parameters": getattr(text_config, "rope_parameters", None),
+        "max_position_embeddings": getattr(
+            text_config, "max_position_embeddings", None
+        ),
+    }
+    payload = json.dumps(normalize_numbers(parameters), sort_keys=True)
     return safe_hash(payload.encode(), usedforsecurity=False).hexdigest()
 
 
@@ -270,12 +328,35 @@ class WeightCacheKey:
     dtype: str
     quantization: str | None
     quant_config_hash: str
+    rope_parameters_hash: str
+    kv_cache_dtype: str
+    kv_cache_dtype_skip_layers: tuple[str, ...]
     revision: str | None
     vllm_version: str
+    pp_size: int = 1
+    pp_rank: int = 0
+    is_draft: bool = False
+    """Daemon group the weights come from; False is the target model."""
+    dp_size: int = 1
+    dp_rank: int = 0
+    enable_expert_parallel: bool = False
+    expert_placement_strategy: str = "linear"
 
     @classmethod
     def from_model_config(
-        cls, model_config: ModelConfig, tp_size: int, tp_rank: int
+        cls,
+        model_config: ModelConfig,
+        tp_size: int,
+        tp_rank: int,
+        *,
+        cache_config: CacheConfig,
+        pp_size: int = 1,
+        pp_rank: int = 0,
+        is_draft: bool = False,
+        dp_size: int = 1,
+        dp_rank: int = 0,
+        enable_expert_parallel: bool = False,
+        expert_placement_strategy: str = "linear",
     ) -> "WeightCacheKey":
         """Build the fingerprint for a model configuration.
 
@@ -297,11 +378,26 @@ class WeightCacheKey:
             model_arch=arch,
             tp_size=tp_size,
             tp_rank=tp_rank,
+            pp_size=pp_size,
+            pp_rank=pp_rank,
             dtype=str(model_config.dtype),
             quantization=model_config.quantization,
-            quant_config_hash=_hash_quant_config(quant_config),
+            quant_config_hash=_hash_quant_config(
+                quant_config=quant_config,
+                runtime_quant_config=model_config.quantization_config,
+            ),
+            rope_parameters_hash=hash_rope_parameters(model_config),
+            kv_cache_dtype=cache_config.cache_dtype,
+            kv_cache_dtype_skip_layers=tuple(
+                sorted(set(cache_config.kv_cache_dtype_skip_layers))
+            ),
             revision=model_config.revision,
             vllm_version=vllm.version.__version__,
+            is_draft=is_draft,
+            dp_size=dp_size,
+            dp_rank=dp_rank,
+            enable_expert_parallel=enable_expert_parallel,
+            expert_placement_strategy=expert_placement_strategy,
         )
 
     def mismatched_fields(self, other: "WeightCacheKey") -> list[str]:
@@ -310,6 +406,38 @@ class WeightCacheKey:
             for f in fields(self)
             if getattr(self, f.name) != getattr(other, f.name)
         ]
+
+
+def json_to_dataclass(cls: type[_DataclassT], payload: Any) -> _DataclassT:
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected a JSON object for {cls.__name__}")
+    names = {field.name for field in fields(cls)}  # type: ignore[arg-type]
+    unknown = set(payload) - names
+    if unknown:
+        raise ValueError(f"Unknown {cls.__name__} fields: {sorted(unknown)}")
+    return cls(**payload)
+
+
+def dataclass_to_json(instance: Any) -> dict[str, Any]:
+    return asdict(instance)
+
+
+def send_json(sock: socket.socket, obj: Any) -> None:
+    payload = json.dumps(obj).encode()
+    if len(payload) > MAX_JSON_MSG_SIZE:
+        raise ValueError("JSON message exceeds configured limit")
+    sock.sendall(_LEN_STRUCT.pack(len(payload)))
+    sock.sendall(payload)
+
+
+def recv_json(
+    sock: socket.socket,
+    max_size: int = MAX_JSON_MSG_SIZE,
+) -> Any:
+    (length,) = _LEN_STRUCT.unpack(_recv_exact(sock, _LEN_STRUCT.size))
+    if length > max_size:
+        raise ValueError(f"Message size {length} exceeds limit {max_size}")
+    return json.loads(_recv_exact(sock, length))
 
 
 @dataclass
@@ -343,6 +471,17 @@ class TensorEntry:
         # have different CUDA_VISIBLE_DEVICES mappings.
         args[6] = device_index
         return rebuild_cuda_tensor(*args)
+
+
+class WeightCacheState(NamedTuple):
+    """Client-side decode of a daemon's get_state response payload."""
+
+    entries: dict[str, TensorEntry]
+    """Model tensors, exported as CUDA IPC handles or shipped by value."""
+    aliases: dict[str, str]
+    """Duplicate (tied) weight names aliased to their canonical entry."""
+    attrs: dict[str, bool]
+    """Python-side flags set by load_weights, e.g. EAGLE ownership flags."""
 
 
 def send_msg(sock: socket.socket, obj: Any) -> None:
