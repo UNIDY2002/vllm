@@ -128,6 +128,8 @@ def _server_args(foundry_config: Path | None) -> list[str]:
         "256",
         "--max-num-seqs",
         "8",
+        "--gpu-memory-utilization",
+        "0.5",
         "--compilation-config",
         _compilation_config(foundry_config),
     ]
@@ -159,28 +161,36 @@ def _run_arm(
     workspace: Path,
 ) -> RunResult:
     startup_start = time.perf_counter()
-    with _LoggedServer(
-        MODEL,
-        _server_args(foundry_config),
-        log_path=log_path,
-        max_wait_seconds=900,
-    ) as server:
-        startup_seconds = time.perf_counter() - startup_start
-        client = server.get_client(timeout=600)
+    try:
+        with _LoggedServer(
+            MODEL,
+            _server_args(foundry_config),
+            log_path=log_path,
+            max_wait_seconds=900,
+        ) as server:
+            startup_seconds = time.perf_counter() - startup_start
+            client = server.get_client(timeout=600)
 
-        # The canary is a separate first request: LOAD must replay a restored
-        # graph before the steady-state benchmark begins.
-        canary = client.completions.create(
-            model=MODEL,
-            prompt="The capital of France is",
-            max_tokens=8,
-            temperature=0.0,
-            top_p=1.0,
-            seed=0,
-        )
-        assert canary.choices[0].text.strip()
+            # The canary is a separate first request: LOAD must replay a restored
+            # graph before the steady-state benchmark begins.
+            canary = client.completions.create(
+                model=MODEL,
+                prompt="The capital of France is",
+                max_tokens=8,
+                temperature=0.0,
+                top_p=1.0,
+                seed=0,
+            )
+            assert canary.choices[0].text.strip()
 
-        outputs, benchmark_seconds, output_tokens = _run_requests(server)
+            outputs, benchmark_seconds, output_tokens = _run_requests(server)
+    except Exception as exc:
+        log_tail = ""
+        if log_path.exists():
+            log_tail = log_path.read_text(encoding="utf-8")[-12000:]
+        raise RuntimeError(
+            f"{name} Foundry server failed; log={log_path}\n{log_tail}"
+        ) from exc
 
     log_text = log_path.read_text(encoding="utf-8")
     restore_seconds = 0.0
