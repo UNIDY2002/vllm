@@ -7,7 +7,7 @@ from collections.abc import Callable, Hashable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from itertools import groupby, product
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast
 
 import torch
 import torch.nn as nn
@@ -67,6 +67,14 @@ class AttentionState(NamedTuple):
     slot_mappings: dict[str, torch.Tensor]
 
 
+CaptureOutput = (
+    torch.Tensor
+    | tuple[torch.Tensor, list[torch.Tensor]]
+    | IntermediateTensors
+    | None
+)
+
+
 @dataclass(frozen=True)
 class BatchExecutionDescriptor:
     """Describes the shape of the batch and CG mode to run; this is used to make shape
@@ -105,7 +113,7 @@ class CreateForwardFn(Protocol):
         self,
         desc: BatchExecutionDescriptor,
         warmup: bool,
-    ) -> Callable[[CUDAGraphMode], None]: ...
+    ) -> Callable[[CUDAGraphMode], CaptureOutput]: ...
 
 
 def _is_compatible(
@@ -179,7 +187,7 @@ class CudaGraphManager:
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         # Keep restored output buffers alive for the lifetime of each graph.
-        self._graph_outputs: dict[BatchExecutionDescriptor, Any] = {}
+        self._graph_outputs: dict[BatchExecutionDescriptor, CaptureOutput] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
         # The stream of the last capture; graphs replayed inside these ones (in
         # their eager breaks) can capture on it to share the pool's free blocks.
@@ -495,10 +503,9 @@ class CudaGraphManager:
                             f"Graph already captured for {desc}"
                         )
                         extension_mode = None
-                        if getattr(
-                            self.vllm_config.compilation_config,
-                            "graph_extension_config_path",
-                            None,
+                        if (
+                            self.vllm_config.compilation_config
+                            .graph_extension_config_path
                         ):
                             from vllm.compilation.foundry_adapter import (
                                 CUDAGraphExtensionMode,
@@ -512,6 +519,7 @@ class CudaGraphManager:
                         ):
                             graph = torch.cuda.CUDAGraph()
                             # Sync offloader's copy stream before capture.
+                            # Ensure any pre-capture prefetches from offloader are complete.
                             get_offloader().sync_prev_onload()
                             if self._capture_mem_samples is not None:
                                 torch.accelerator.synchronize()
@@ -523,6 +531,10 @@ class CudaGraphManager:
                                 ),
                             ):
                                 forward_fn(CUDAGraphMode.NONE)
+                                # Join offloader's copy stream after forward to avoid
+                                # unjoined stream error. The last layer's start_prefetch
+                                # forks copy_stream, but wait_prefetch only happens in
+                                # the next forward pass.
                                 get_offloader().join_after_forward()
                         else:
                             from vllm.compilation.foundry_adapter.graph_ops import (
@@ -550,7 +562,7 @@ class CudaGraphManager:
                             # LOAD returns the output buffer restored from the
                             # archive; SAVE returns the buffer populated by the
                             # captured forward closure.
-                            self._graph_outputs[desc] = loaded_output
+                            self._graph_outputs[desc] = cast(CaptureOutput, loaded_output)
                         if self._capture_mem_samples is not None:
                             torch.accelerator.synchronize()
                             free_after = torch.accelerator.get_memory_info()[0]
@@ -687,16 +699,16 @@ class ModelCudaGraphManager(CudaGraphManager):
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=1 or cudagraph_mode=NONE/FULL."
             )
 
-        def store_capture_output(num_tokens: int, model_output: Any) -> Any:
+        def store_capture_output(
+            num_tokens: int, model_output: Any
+        ) -> CaptureOutput:
             """Copy outputs to persistent buffers, allocating on first use."""
             # Foundry LOAD reconstructs output tensors from their recorded
             # addresses.  Do not allocate V1's runner output during the
             # eager warmup before capture; that would place it in the regular
             # CUDA allocator instead of the deterministic VMM region.
-            extension_path = getattr(
-                self.vllm_config.compilation_config,
-                "graph_extension_config_path",
-                None,
+            extension_path = (
+                self.vllm_config.compilation_config.graph_extension_config_path
             )
             if extension_path:
                 from vllm.compilation.foundry_adapter import (
@@ -718,7 +730,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 )
 
                 if output_buffer is None and not is_capture_active():
-                    return model_output
+                    return None
             if self.is_last_pp_rank:
                 # Last PP rank (common case).
                 if self.use_aux_hidden_state_outputs:
@@ -750,7 +762,7 @@ class ModelCudaGraphManager(CudaGraphManager):
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor, warmup: bool
-        ) -> Callable[[CUDAGraphMode], None]:
+        ) -> Callable[[CUDAGraphMode], CaptureOutput]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
 
@@ -803,7 +815,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     model, model_inputs, ubatch_state, for_capture=True
                 )
 
-                def ubatch_forward_fn(cg_mode: CUDAGraphMode) -> Any:
+                def ubatch_forward_fn(cg_mode: CUDAGraphMode) -> CaptureOutput:
                     assert cg_mode != CUDAGraphMode.PIECEWISE, (
                         "DBO does not support PIECEWISE cudagraphs"
                     )
@@ -830,7 +842,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             if pcp_manager is not None:
                 is_padding = pcp_manager.moe_is_padding(is_padding)
 
-            def forward_fn(cg_mode: CUDAGraphMode) -> Any:
+            def forward_fn(cg_mode: CUDAGraphMode) -> CaptureOutput:
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
                     batch_descriptor = BatchDescriptor(

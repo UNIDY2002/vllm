@@ -148,7 +148,7 @@ def _compute_rank_from_parallel_config(
     survives that reset. ``parallel_config.rank`` is the TP/PP rank inside
     the shard; ``parallel_config.world_size`` is TP*PP*DCP per shard.
     """
-    dp_index = getattr(parallel_config, "data_parallel_index", 0) or 0
+    dp_index = parallel_config.data_parallel_index
     return dp_index * parallel_config.world_size + parallel_config.rank
 
 

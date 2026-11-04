@@ -774,7 +774,7 @@ def _patch_initialize_kv_caches() -> None:
 
         # data_parallel_index survives vLLM's "treat as DP=1" reset; use
         # it so only the DP-shard-0 EngineCore writes warmup_state.json.
-        dp_shard = getattr(vllm_config.parallel_config, "data_parallel_index", 0) or 0
+        dp_shard = vllm_config.parallel_config.data_parallel_index
         if mode == CUDAGraphExtensionMode.SAVE and root is not None and dp_shard == 0:
             os.makedirs(root, exist_ok=True)
             if ws is not None:
