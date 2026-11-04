@@ -238,6 +238,16 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        if vllm_config.compilation_config.graph_extension_config_path:
+            if vllm_config.use_v2_model_runner:
+                raise RuntimeError(
+                    "Foundry CUDA Graph persistence currently supports only "
+                    "the V1 model runner; set VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            from vllm.compilation.foundry_adapter import install_hooks
+
+            install_hooks(vllm_config.compilation_config)
+
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
         torch.set_float32_matmul_precision(precision)
