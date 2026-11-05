@@ -133,6 +133,8 @@ def _compilation_config(foundry_config: Path | None) -> str:
 def _server_args(foundry_config: Path | None) -> list[str]:
     return [
         "--trust-remote-code",
+        "--skip-mm-profiling",
+        "--disable-custom-all-reduce",
         "--max-model-len",
         "256",
         "--max-num-seqs",
