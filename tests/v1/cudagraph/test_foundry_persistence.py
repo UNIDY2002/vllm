@@ -109,7 +109,8 @@ def _write_foundry_config(path: Path, mode: str, workspace: Path) -> None:
                 f'mode = "{mode}"',
                 f'workspace_root = "{workspace}"',
                 'base_addr = "0x600000000000"',
-                'region_size = "512GB"',
+                'region_size = "256GB"',
+                'scratch_space_size = "2GB"',
             ]
         )
         + "\n",
@@ -118,13 +119,7 @@ def _write_foundry_config(path: Path, mode: str, workspace: Path) -> None:
 
 
 def _compilation_config(foundry_config: Path | None) -> str:
-    config = {
-        # Foundry persistence currently covers the V1 FULL graph boundary.
-        # FULL falls back to FULL_AND_PIECEWISE with FlashInfer, which routes
-        # the workload through the non-persistent PIECEWISE path.
-        "cudagraph_mode": "FULL_DECODE_ONLY",
-        "cudagraph_capture_sizes": CAPTURE_SIZES,
-    }
+    config = {"cudagraph_capture_sizes": CAPTURE_SIZES}
     if foundry_config is not None:
         config["graph_extension_config_path"] = str(foundry_config)
     return json.dumps(config)
@@ -133,14 +128,19 @@ def _compilation_config(foundry_config: Path | None) -> str:
 def _server_args(foundry_config: Path | None) -> list[str]:
     return [
         "--trust-remote-code",
+        "--tokenizer-mode",
+        "kimi_k3",
+        "--dtype",
+        "bfloat16",
+        "--quantization",
+        "mxfp4",
         "--skip-mm-profiling",
-        "--disable-custom-all-reduce",
         "--max-model-len",
-        "256",
+        "128",
         "--max-num-seqs",
-        "8",
+        "2",
         "--gpu-memory-utilization",
-        "0.5",
+        "0.75",
         "--compilation-config",
         _compilation_config(foundry_config),
     ]
