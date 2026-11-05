@@ -80,9 +80,9 @@ class _LoggedServer(RemoteOpenAIServer):
         env["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if env_dict:
             env.update(env_dict)
-        # Keep the caller's worktree import path.  The generic test helper
-        # strips PYTHONPATH to isolate ordinary tests, which would select an
-        # older installed vLLM without the adapter in this integration test.
+        # Pin the server to this checkout.  The venv can contain an older
+        # editable vLLM, which would silently bypass the adapter under test.
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
         self._log_file = self._log_path.open("w", encoding="utf-8")
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", model,
