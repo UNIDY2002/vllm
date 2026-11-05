@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import itertools
+import os
 from collections import defaultdict
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from contextlib import ExitStack
@@ -513,6 +514,15 @@ class CudaGraphManager:
                         # optional path can be absent from a worker copy even
                         # though the adapter is active.
                         extension_mode = get_graph_extension_mode()
+                        if extension_mode == CUDAGraphExtensionMode.NONE:
+                            # The Foundry hook exports the mode for child
+                            # workers; use it when the optional compilation
+                            # field was dropped during config serialization.
+                            foundry_mode = os.environ.get("FOUNDRY_MODE")
+                            if foundry_mode:
+                                extension_mode = CUDAGraphExtensionMode(
+                                    foundry_mode
+                                )
                         if (
                             extension_mode is None
                             or extension_mode == CUDAGraphExtensionMode.NONE
