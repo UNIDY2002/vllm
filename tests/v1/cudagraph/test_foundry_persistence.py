@@ -118,7 +118,10 @@ def _write_foundry_config(path: Path, mode: str, workspace: Path) -> None:
 
 def _compilation_config(foundry_config: Path | None) -> str:
     config = {
-        "cudagraph_mode": "FULL",
+        # Foundry persistence currently covers the V1 FULL graph boundary.
+        # FULL falls back to FULL_AND_PIECEWISE with FlashInfer, which routes
+        # the workload through the non-persistent PIECEWISE path.
+        "cudagraph_mode": "FULL_DECODE_ONLY",
         "cudagraph_capture_sizes": CAPTURE_SIZES,
     }
     if foundry_config is not None:
