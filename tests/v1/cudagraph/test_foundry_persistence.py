@@ -75,6 +75,10 @@ class _LoggedServer(RemoteOpenAIServer):
     def _start_server(self, model, vllm_serve_args, env_dict):
         env = os.environ.copy()
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        # The current adapter integrates with the V1 GPUModelRunner.  Pin this
+        # explicitly so a host-wide V2 default cannot make the test fail before
+        # Foundry initialization.
+        env["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if env_dict:
             env.update(env_dict)
         _sanitize_pythonpath_env(env)
