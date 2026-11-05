@@ -502,22 +502,17 @@ class CudaGraphManager:
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
-                        extension_mode = None
-                        if (
-                            self.vllm_config.compilation_config
-                            .graph_extension_config_path
-                        ):
-                            from vllm.compilation.foundry_adapter import (
-                                CUDAGraphExtensionMode,
-                                get_graph_extension_mode,
-                            )
+                        from vllm.compilation.foundry_adapter.config import (
+                            CUDAGraphExtensionMode,
+                            get_graph_extension_mode,
+                        )
 
-                            extension_mode = get_graph_extension_mode()
-                            logger.info(
-                                "Foundry graph extension mode for %s: %s",
-                                desc,
-                                extension_mode,
-                            )
+                        # The adapter config is process-local and is loaded by
+                        # install_hooks before the worker starts.  Do not gate
+                        # this on CompilationConfig serialization: the
+                        # optional path can be absent from a worker copy even
+                        # though the adapter is active.
+                        extension_mode = get_graph_extension_mode()
                         if (
                             extension_mode is None
                             or extension_mode == CUDAGraphExtensionMode.NONE
