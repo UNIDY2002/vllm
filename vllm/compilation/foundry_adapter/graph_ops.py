@@ -167,6 +167,7 @@ def capture_or_load_graph(
     piecewise_compile_index = _piecewise_index(runtime_mode, runnable)
 
     if mode == CUDAGraphExtensionMode.SAVE:
+        log.info("[foundry] SAVE capture_or_load_graph: %s", batch_descriptor)
         # vLLM main: the offloader's copy stream is forked by the last
         # layer's prefetch and must be joined inside the capture (no-op when
         # CPU offloading is off; absent on older branches).
@@ -203,6 +204,7 @@ def capture_or_load_graph(
         )
         json_path = os.path.join(cfg.workspace_dir, filename)
         graph.save(json_path, output)
+        log.info("[foundry] SAVE graph archive: %s", json_path)
         state.capture_index += 1
 
         if weak_ref_output:
