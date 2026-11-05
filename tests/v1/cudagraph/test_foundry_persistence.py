@@ -23,7 +23,6 @@ import pytest
 
 from tests.utils import (
     RemoteOpenAIServer,
-    _sanitize_pythonpath_env,
     large_gpu_mark,
 )
 
@@ -81,13 +80,9 @@ class _LoggedServer(RemoteOpenAIServer):
         env["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if env_dict:
             env.update(env_dict)
-        source_pythonpath = os.environ.get("PYTHONPATH")
-        _sanitize_pythonpath_env(env)
-        # The server must import the same worktree under test.  The generic
-        # helper removes PYTHONPATH to isolate ordinary tests, but doing so
-        # here silently selects an older installed vLLM without the adapter.
-        if source_pythonpath:
-            env["PYTHONPATH"] = source_pythonpath
+        # Keep the caller's worktree import path.  The generic test helper
+        # strips PYTHONPATH to isolate ordinary tests, which would select an
+        # older installed vLLM without the adapter in this integration test.
         self._log_file = self._log_path.open("w", encoding="utf-8")
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", model,
