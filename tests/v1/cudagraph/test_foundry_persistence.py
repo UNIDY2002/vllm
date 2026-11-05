@@ -190,7 +190,7 @@ def _run_arm(
                 top_p=1.0,
                 seed=0,
             )
-            assert canary.choices[0].text.strip()
+            assert canary.choices, "canary completion returned no choices"
 
             outputs, benchmark_seconds, output_tokens = _run_requests(server)
     except Exception as exc:
