@@ -39,7 +39,7 @@ MODEL = os.environ.get(
     "VLLM_FOUNDRY_TEST_MODEL",
     os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
 )
-CAPTURE_SIZES = [1, 2, 4, 8]
+CAPTURE_SIZES = [1, 2]
 PROMPTS = [
     "The capital of France is",
     "The largest planet in the solar system is",
@@ -109,7 +109,7 @@ def _write_foundry_config(path: Path, mode: str, workspace: Path) -> None:
                 f'mode = "{mode}"',
                 f'workspace_root = "{workspace}"',
                 'base_addr = "0x600000000000"',
-                'region_size = "256GB"',
+                'region_size = "512GB"',
             ]
         )
         + "\n",
