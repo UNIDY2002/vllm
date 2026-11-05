@@ -513,6 +513,11 @@ class CudaGraphManager:
                             )
 
                             extension_mode = get_graph_extension_mode()
+                            logger.info(
+                                "Foundry graph extension mode for %s: %s",
+                                desc,
+                                extension_mode,
+                            )
                         if (
                             extension_mode is None
                             or extension_mode == CUDAGraphExtensionMode.NONE
