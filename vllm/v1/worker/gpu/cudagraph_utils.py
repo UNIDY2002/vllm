@@ -513,6 +513,11 @@ class CudaGraphManager:
                         # optional path can be absent from a worker copy even
                         # though the adapter is active.
                         extension_mode = get_graph_extension_mode()
+                        logger.warning(
+                            "Foundry graph runner: file=%s mode=%s",
+                            __file__,
+                            extension_mode,
+                        )
                         if (
                             extension_mode is None
                             or extension_mode == CUDAGraphExtensionMode.NONE
