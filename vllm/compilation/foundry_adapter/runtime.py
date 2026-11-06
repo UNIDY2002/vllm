@@ -249,8 +249,19 @@ def capture_final_alloc_offset() -> int:
     )
     if cfg is not None and cfg.workspace_dir is not None:
         path = os.path.join(cfg.workspace_dir, "final_alloc_offset.json")
+        # Persist the live VMM ranges, not only the cursor watermark.  A
+        # contiguous preallocation can end in the middle of a CUDA allocator
+        # segment; LOAD would then try to map an overlapping tail and either
+        # fall back to a different address or corrupt the restored graph.
+        ranges = fops.get_live_region_ranges()
         with open(path, "w") as f:
-            json.dump({"final_alloc_offset": offset}, f)
+            json.dump(
+                {
+                    "final_alloc_offset": offset,
+                    "live_ranges": ranges,
+                },
+                f,
+            )
         log.info("[foundry] Saved per-rank final_alloc_offset to %s", path)
     return offset
 
@@ -268,22 +279,21 @@ def preallocate_for_load_mode() -> None:
 
     # Per-rank file preferred (EP), fall back to shared warmup state.
     final = 0
+    live_ranges = None
     if cfg.workspace_dir is not None:
         p = os.path.join(cfg.workspace_dir, "final_alloc_offset.json")
         if os.path.exists(p):
             with open(p) as f:
-                final = json.load(f).get("final_alloc_offset", 0)
+                data = json.load(f)
+                final = data.get("final_alloc_offset", 0)
+                live_ranges = data.get("live_ranges")
     if final <= 0 and cfg.workspace_root is not None:
         final = load_warmup_state(cfg.workspace_root).final_alloc_offset
     if final <= 0:
         return
 
     current = fops.get_current_alloc_offset()
-    # The caching allocator may request a segment that straddles the saved
-    # watermark by a small amount.  Map one allocator segment of slack so the
-    # LOAD path never tries to remap an already-mapped VMM range.
-    segment_slack = 32 * 1024 * 1024
-    remaining = final - current + segment_slack
+    remaining = final - current
     if remaining <= 0:
         log.info("[foundry] LOAD: no preallocation needed")
         return
@@ -294,7 +304,16 @@ def preallocate_for_load_mode() -> None:
         remaining / (1024**3),
     )
     t = time.perf_counter()
-    if fops.preallocate_region(remaining):
+    if live_ranges is not None:
+        ranges = [
+            (int(offset), int(size))
+            for offset, size in live_ranges
+            if int(offset) + int(size) > current and int(offset) < final
+        ]
+        ok = fops.preallocate_ranges(ranges, final)
+    else:
+        ok = fops.preallocate_region(remaining)
+    if ok:
         log.info("[foundry TIMING] preallocate_region: %.3f s", time.perf_counter() - t)
     else:
         log.warning("[foundry] preallocate_region failed for %d bytes", remaining)
