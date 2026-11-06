@@ -279,7 +279,11 @@ def preallocate_for_load_mode() -> None:
         return
 
     current = fops.get_current_alloc_offset()
-    remaining = final - current
+    # The caching allocator may request a segment that straddles the saved
+    # watermark by a small amount.  Map one allocator segment of slack so the
+    # LOAD path never tries to remap an already-mapped VMM range.
+    segment_slack = 32 * 1024 * 1024
+    remaining = final - current + segment_slack
     if remaining <= 0:
         log.info("[foundry] LOAD: no preallocation needed")
         return
