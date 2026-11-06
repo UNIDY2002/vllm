@@ -207,16 +207,13 @@ def _patch_kernel_warmup() -> None:
 
     @functools.wraps(orig)
     def patched(worker):
-        if get_graph_extension_mode() == CUDAGraphExtensionMode.NONE:
-            return orig(worker)
-        try:
-            return orig(worker)
-        except ModuleNotFoundError as exc:
-            # Some optional vision warmups import torchvision even for a
-            # text-only checkpoint.  Keep the remaining startup path usable.
-            if exc.name != "torchvision":
-                raise
-            log.warning("[foundry] skipping optional vision kernel warmup: %s", exc)
+        # Foundry archives the CUDA modules and fatbins used by captured
+        # graphs. Running vLLM's warmup/autotune pass again on SAVE or LOAD
+        # allocates process-dependent workspaces and breaks the deterministic
+        # VMM trajectory required by archived replay.
+        if get_graph_extension_mode() != CUDAGraphExtensionMode.NONE:
+            return None
+        return orig(worker)
 
     gw.kernel_warmup = patched  # type: ignore[assignment]
 
