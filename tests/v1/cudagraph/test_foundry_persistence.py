@@ -250,7 +250,12 @@ def test_foundry_native_save_load_round_trip_and_benchmark(tmp_path: Path):
     log_root = Path(os.environ.get("VLLM_FOUNDRY_LOG_DIR", tmp_path))
     log_root.mkdir(parents=True, exist_ok=True)
     native = _run_arm("native", None, log_root / "native.log", workspace)
-    save = _run_arm("save", save_config, log_root / "save.log", workspace)
+    # vLLM's KV memory profile is not reproducible on the first SAVE pass.
+    # SAVE pass 1 persists warmup_state.json; pass 2 reuses that state and
+    # writes the archive from the deterministic allocation trajectory that
+    # LOAD must reproduce.
+    _run_arm("save-pass1", save_config, log_root / "save-pass1.log", workspace)
+    save = _run_arm("save", save_config, log_root / "save-pass2.log", workspace)
     load = _run_arm("load", load_config, log_root / "load.log", workspace)
 
     # The full fixed workload is the correctness contract, not only the canary.
