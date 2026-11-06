@@ -283,8 +283,16 @@ def _load_model_with_overlap(
     if mode == CUDAGraphExtensionMode.NONE:
         return do_original_load()
 
-    result = do_original_load()
     cfg = get_config()
+    if mode == CUDAGraphExtensionMode.LOAD and not (
+        cfg is not None and cfg.recapture_on_load
+    ):
+        # Map the complete deterministic SAVE span before loading weights.
+        # Weight tensors must receive the same VMM addresses as the capture
+        # process; mapping only the tail after weight load leaves archived
+        # graph parameters pointing at a different allocation layout.
+        rt.preallocate_for_load_mode()
+    result = do_original_load()
     if mode == CUDAGraphExtensionMode.LOAD and not (
         cfg is not None and cfg.recapture_on_load
     ):
@@ -448,9 +456,6 @@ def _patch_capture_model() -> None:
                     start_graph_builds,
                 )
 
-                # Eager communication workspaces must consume the same VMM
-                # prefix as SAVE before the remaining graph span is mapped.
-                rt.preallocate_for_load_mode()
                 start_graph_builds()
 
             if _accepts_profile_only:

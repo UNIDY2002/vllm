@@ -207,13 +207,6 @@ def capture_or_load_graph(
         )
         json_path = os.path.join(cfg.workspace_dir, filename)
         graph.save(json_path, output)
-        log.info(
-            "[foundry DIAG] SAVE graph=%s offset=%d output_ptrs=%s pool=%s",
-            filename,
-            fops.get_current_alloc_offset(),
-            _output_ptrs(output),
-            graph_pool,
-        )
         state.capture_index += 1
 
         if weak_ref_output:
@@ -256,14 +249,6 @@ def capture_or_load_graph(
         graph, output = FoundryCUDAGraph.finish_one_graph_load(
             _pending_graph_builds.pending, index
         )
-        log.info(
-            "[foundry DIAG] LOAD graph=%s index=%d offset=%d output_ptrs=%s pool=%s",
-            batch_descriptor,
-            index,
-            fops.get_current_alloc_offset(),
-            _output_ptrs(output),
-            graph.raw_cuda_graph(),
-        )
         # Strong-reference the (graph, output) pair. The upstream
         # CUDAGraphWrapper stores `entry.output = weak_ref_tensors(output)`,
         # so without this dict the VMM-backed output tensors get GC'd between
@@ -275,14 +260,6 @@ def capture_or_load_graph(
     raise RuntimeError(
         f"capture_or_load_graph called with mode {mode}, expected NONE, SAVE, or LOAD"
     )
-
-
-def _output_ptrs(output) -> list[int]:
-    if isinstance(output, torch.Tensor):
-        return [output.data_ptr()]
-    if isinstance(output, (list, tuple)):
-        return [p for item in output for p in _output_ptrs(item)]
-    return []
 
 
 # ---------------------------------------------------------------------------
