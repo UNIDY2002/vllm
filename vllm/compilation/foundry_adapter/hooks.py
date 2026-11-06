@@ -301,7 +301,17 @@ def _load_model_with_overlap(
                 for name, param in result.named_parameters()
                 if param is not None
             ][:8]
-            log.info("[foundry DIAG] %s weight_ptrs=%s", mode.value.upper(), sample)
+            buffers = [
+                (name, int(buffer.data_ptr()), tuple(buffer.shape), str(buffer.dtype))
+                for name, buffer in result.named_buffers()
+                if buffer is not None
+            ][:16]
+            log.info(
+                "[foundry DIAG] %s weight_ptrs=%s buffer_ptrs=%s",
+                mode.value.upper(),
+                sample,
+                buffers,
+            )
         except Exception as exc:
             log.debug("[foundry DIAG] weight pointer fingerprint failed: %s", exc)
     if mode == CUDAGraphExtensionMode.LOAD and not (
