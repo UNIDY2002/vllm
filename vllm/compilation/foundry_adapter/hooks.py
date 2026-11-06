@@ -290,6 +290,20 @@ def _load_model_with_overlap(
         # graph parameters pointing at a different allocation layout.
         rt.preallocate_for_load_mode()
     result = do_original_load()
+    if mode != CUDAGraphExtensionMode.NONE:
+        # Keep a compact pointer fingerprint in the engine log while debugging
+        # SAVE/LOAD parity.  Archived kernels embed raw weight addresses, so a
+        # successful VMM cursor check alone does not prove that the loaded
+        # quantized weights landed at the same addresses.
+        try:
+            sample = [
+                (name, int(param.data_ptr()), tuple(param.shape), str(param.dtype))
+                for name, param in result.named_parameters()
+                if param is not None
+            ][:8]
+            log.info("[foundry DIAG] %s weight_ptrs=%s", mode.value.upper(), sample)
+        except Exception as exc:
+            log.debug("[foundry DIAG] weight pointer fingerprint failed: %s", exc)
     if mode == CUDAGraphExtensionMode.LOAD and not (
         cfg is not None and cfg.recapture_on_load
     ):
