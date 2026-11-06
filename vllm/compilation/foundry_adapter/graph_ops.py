@@ -249,13 +249,6 @@ def capture_or_load_graph(
         graph, output = FoundryCUDAGraph.finish_one_graph_load(
             _pending_graph_builds.pending, index
         )
-        if os.environ.get("VLLM_FOUNDRY_LOAD_REPLAY_INIT") == "1":
-            # Optional diagnostic: launch the restored graph once with the
-            # capture-loop dummy inputs so stateful workspaces referenced by
-            # archived kernels receive the same initialization they had after
-            # SAVE capture. This remains replay-only; no graph is recaptured.
-            graph.replay()
-            torch.cuda.synchronize()
         # Strong-reference the (graph, output) pair. The upstream
         # CUDAGraphWrapper stores `entry.output = weak_ref_tensors(output)`,
         # so without this dict the VMM-backed output tensors get GC'd between

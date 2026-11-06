@@ -437,22 +437,6 @@ def _patch_capture_model() -> None:
                 for ag in ag_list
                 for b in ag.metadata_builders
             ]
-            if os.environ.get("VLLM_FOUNDRY_DIAG_INPUTS") == "1":
-                buffers = self.input_buffers
-                log.warning(
-                    "[foundry DIAG] %s input_buffers=%s",
-                    mode.value.upper(),
-                    {
-                        "input_ids": int(buffers.input_ids.data_ptr()),
-                        "positions": int(buffers.positions.data_ptr()),
-                        "is_padding": int(buffers.is_padding.data_ptr()),
-                        "query_start_loc": int(buffers.query_start_loc.data_ptr()),
-                        "seq_lens": int(buffers.seq_lens.data_ptr()),
-                        "dcp_local_seq_lens": int(
-                            buffers.dcp_local_seq_lens.data_ptr()
-                        ),
-                    },
-                )
             rt.prepare_graph_capture(
                 metadata_builders=builders,
                 device=self.device,
