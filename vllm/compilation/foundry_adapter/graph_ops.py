@@ -262,7 +262,7 @@ def capture_or_load_graph(
             index,
             fops.get_current_alloc_offset(),
             _output_ptrs(output),
-            graph.pool(),
+            graph.raw_cuda_graph(),
         )
         # Strong-reference the (graph, output) pair. The upstream
         # CUDAGraphWrapper stores `entry.output = weak_ref_tensors(output)`,
