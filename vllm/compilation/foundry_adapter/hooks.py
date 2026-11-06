@@ -533,14 +533,9 @@ def _patch_cuda_graph_wrapper_call() -> None:
         bd = fc.batch_descriptor
         rm = fc.cudagraph_runtime_mode
 
-        extension_mode = get_graph_extension_mode()
-        if extension_mode in (
-            CUDAGraphExtensionMode.SAVE,
-            CUDAGraphExtensionMode.LOAD,
-        ):
-            # V1's outer ModelCudaGraphManager is the persistence boundary.
-            # Bypass every compilation-level graph wrapper, including
-            # Breakable wrappers, throughout SAVE and LOAD.
+        if rt.is_capture_active():
+            # The outer wrapper owns the Foundry capture. Nested wrappers must
+            # execute their model directly instead of starting another graph.
             runnable = self.runnable
             while hasattr(runnable, "unwrap"):
                 unwrapped = runnable.unwrap()

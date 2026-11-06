@@ -78,9 +78,7 @@ class _LoggedServer(RemoteOpenAIServer):
         # explicitly so a host-wide V2 default cannot make the test fail before
         # Foundry initialization.
         env["VLLM_USE_V2_MODEL_RUNNER"] = "0"
-        # Foundry's V1 persistence boundary wraps the regular FULL graph
-        # capture. Breakable graphs use a separate wrapper path and bypass the
-        # archive writer, so match the known-good K3 launch explicitly.
+        # Exercise regular FULL decode graphs at the wrapper boundary.
         env["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "0"
         if env_dict:
             env.update(env_dict)
