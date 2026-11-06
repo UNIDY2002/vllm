@@ -897,15 +897,12 @@ class ModelCudaGraphManager(CudaGraphManager):
                     is_padding=is_padding,
                 ):
                     if os.environ.get("VLLM_FOUNDRY_DIAG_PTRS") == "1":
-                        from vllm.compilation.foundry_adapter import (
-                            get_graph_extension_mode,
-                        )
-
-                        if get_graph_extension_mode().value != "none":
+                        foundry_mode = os.environ.get("FOUNDRY_MODE", "none")
+                        if foundry_mode != "none":
                             logger.info(
                                 "[foundry DIAG] %s input_ptrs desc=%s inputs=%s "
                                 "attn=%s slots=%s",
-                                get_graph_extension_mode().value.upper(),
+                                foundry_mode.upper(),
                                 desc,
                                 _foundry_tensor_ptrs(model_inputs),
                                 _foundry_tensor_ptrs(attn_metadata),
