@@ -121,7 +121,14 @@ def _write_foundry_config(path: Path, mode: str, workspace: Path) -> None:
 
 
 def _compilation_config(foundry_config: Path | None) -> str:
-    config = {"cudagraph_capture_sizes": CAPTURE_SIZES}
+    # Keep this CI workload on the FULL decode path.  PIECEWISE capture creates
+    # dozens of backend subgraphs whose restore order is a separate contract;
+    # this test targets the Foundry archive/replay lifecycle for the V1 wrapper
+    # graphs and exercises two deterministic decode sizes.
+    config = {
+        "cudagraph_capture_sizes": CAPTURE_SIZES,
+        "cudagraph_mode": "FULL_DECODE_ONLY",
+    }
     if foundry_config is not None:
         config["graph_extension_config_path"] = str(foundry_config)
     return json.dumps(config)

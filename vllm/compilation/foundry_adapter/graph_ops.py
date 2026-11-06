@@ -184,7 +184,15 @@ def capture_or_load_graph(
 
         rt.set_capture_active(True)
         try:
-            with foundry_graph_ctx(graph, pool=graph_pool):
+            # vLLM's native CUDAGraphWrapper captures on the current runner
+            # stream.  Foundry otherwise falls back to its private default
+            # stream, which changes stream ordering and makes an archived
+            # graph unsafe to launch from the runner's replay stream.
+            with foundry_graph_ctx(
+                graph,
+                pool=graph_pool,
+                stream=torch.cuda.current_stream(),
+            ):
                 output = runnable(*runnable_args, **runnable_kwargs)
                 if get_offloader is not None:
                     get_offloader().join_after_forward()
