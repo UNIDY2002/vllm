@@ -255,6 +255,12 @@ def capture_or_load_graph(
         # captures and the next replay writes to freed memory → CUDA illegal
         # memory access. Don't drop this line.
         state.loaded_graphs[identifier] = (graph, output)
+        # SAVE executes the model once while capturing each graph. LOAD only
+        # reconstructs the graph object, so graph-owned persistent state would
+        # otherwise stay at its post-allocation contents until the first user
+        # request. Mirror SAVE with one archived replay; this remains replay
+        # and does not recapture or rebuild the graph.
+        graph.replay()
         return graph, output
 
     raise RuntimeError(
