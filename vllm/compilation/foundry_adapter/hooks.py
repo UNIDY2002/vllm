@@ -469,6 +469,13 @@ def _patch_capture_model() -> None:
 
                 unlock_workspace()
                 log.info("[foundry] unlocked workspace (allow growth at inference)")
+                # Restored graphs are rebuilt by Foundry at the driver level;
+                # unlike a native torch graph pool, the caching allocator does
+                # not know which cached-but-free segments are still referenced
+                # by those graphs. Return those segments before inference so a
+                # later eager allocation cannot reuse an archived graph VA.
+                torch.cuda.empty_cache()
+                log.info("[foundry] emptied CUDA cache after LOAD graph restore")
 
             # Only memory referenced by captured CUDA graphs needs the
             # deterministic VMM region. Past this point (sampler warmup +
