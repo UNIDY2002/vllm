@@ -68,6 +68,32 @@ class AttentionState(NamedTuple):
     slot_mappings: dict[str, torch.Tensor]
 
 
+def _foundry_tensor_ptrs(value: object, prefix: str = "") -> list[tuple[str, int]]:
+    """Return a bounded tensor-pointer fingerprint for Foundry diagnostics."""
+    if isinstance(value, torch.Tensor):
+        return [(prefix, int(value.data_ptr()))]
+    if isinstance(value, dict):
+        result: list[tuple[str, int]] = []
+        for key, item in value.items():
+            result.extend(_foundry_tensor_ptrs(item, f"{prefix}.{key}"))
+        return result
+    if isinstance(value, (tuple, list)):
+        result = []
+        for index, item in enumerate(value):
+            result.extend(_foundry_tensor_ptrs(item, f"{prefix}[{index}]"))
+        return result
+    try:
+        fields = vars(value)
+    except TypeError:
+        return []
+    if fields:
+        result = []
+        for key, item in fields.items():
+            result.extend(_foundry_tensor_ptrs(item, f"{prefix}.{key}"))
+        return result
+    return []
+
+
 CaptureOutput = (
     torch.Tensor
     | tuple[torch.Tensor, list[torch.Tensor]]
@@ -870,6 +896,21 @@ class ModelCudaGraphManager(CudaGraphManager):
                     batch_descriptor=batch_descriptor,
                     is_padding=is_padding,
                 ):
+                    if os.environ.get("VLLM_FOUNDRY_DIAG_PTRS") == "1":
+                        from vllm.compilation.foundry_adapter import (
+                            get_graph_extension_mode,
+                        )
+
+                        if get_graph_extension_mode().value != "none":
+                            logger.info(
+                                "[foundry DIAG] %s input_ptrs desc=%s inputs=%s "
+                                "attn=%s slots=%s",
+                                get_graph_extension_mode().value.upper(),
+                                desc,
+                                _foundry_tensor_ptrs(model_inputs),
+                                _foundry_tensor_ptrs(attn_metadata),
+                                _foundry_tensor_ptrs(slot_mappings),
+                            )
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside
                         # run_pw_graph).
