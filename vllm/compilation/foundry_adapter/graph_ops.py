@@ -184,15 +184,11 @@ def capture_or_load_graph(
 
         rt.set_capture_active(True)
         try:
-            # vLLM's native CUDAGraphWrapper captures on the current runner
-            # stream.  Foundry otherwise falls back to its private default
-            # stream, which changes stream ordering and makes an archived
-            # graph unsafe to launch from the runner's replay stream.
-            with foundry_graph_ctx(
-                graph,
-                pool=graph_pool,
-                stream=torch.cuda.current_stream(),
-            ):
+            # Keep Foundry's fixed capture stream.  LOAD reconstructs graph
+            # templates on the same process-local stream; using the runner's
+            # transient stream here changes the recorded stream dependencies
+            # across SAVE and LOAD.
+            with foundry_graph_ctx(graph, pool=graph_pool):
                 output = runnable(*runnable_args, **runnable_kwargs)
                 if get_offloader is not None:
                     get_offloader().join_after_forward()
@@ -350,17 +346,7 @@ def start_graph_builds() -> None:
         len(json_paths),
         num_threads,
     )
-    # Native vLLM CUDAGraphWrapper gives every entry the same process-global
-    # graph pool.  SAVE captures into that pool as well; LOAD must pass it to
-    # Foundry while it reconstructs the archived templates, otherwise the
-    # restored graph can be associated with a different allocator pool and
-    # replay may dereference addresses that were never mapped for this pool.
-    from vllm.platforms import current_platform
-
-    graph_pool = current_platform.get_global_graph_pool()
-    pending = FoundryCUDAGraph.start_graph_builds(
-        json_paths, pool=graph_pool, num_threads=num_threads
-    )
+    pending = FoundryCUDAGraph.start_graph_builds(json_paths, num_threads=num_threads)
     log.info(
         "[foundry] start_graph_builds returned in %.3fs (building in background)",
         time.perf_counter() - s,
