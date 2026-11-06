@@ -304,15 +304,25 @@ def preallocate_for_load_mode() -> None:
         remaining / (1024**3),
     )
     t = time.perf_counter()
-    if live_ranges is not None:
+    # Graph kernel parameters can retain pointers to temporary workspaces that
+    # were freed after SAVE capture.  ``live_ranges`` intentionally excludes
+    # those allocations, so mapping only the live set leaves their addresses
+    # backed by unmapped or unrelated memory on LOAD.  This call runs before
+    # weight restoration, while the deterministic region is still empty after
+    # the scratch boundary, so the complete span can be mapped safely and all
+    # archived graph pointers remain valid.
+    ok = fops.preallocate_region(remaining)
+    if not ok and live_ranges is not None:
         ranges = [
             (int(offset), int(size))
             for offset, size in live_ranges
             if int(offset) + int(size) > current and int(offset) < final
         ]
+        log.warning(
+            "[foundry] LOAD: full-span preallocation failed; falling back to "
+            "live ranges (archived temporary pointers may be unavailable)"
+        )
         ok = fops.preallocate_ranges(ranges, final)
-    else:
-        ok = fops.preallocate_region(remaining)
     if ok:
         log.info("[foundry TIMING] preallocate_region: %.3f s", time.perf_counter() - t)
     else:
