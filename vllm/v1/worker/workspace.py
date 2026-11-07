@@ -129,6 +129,31 @@ class WorkspaceManager:
         """Check if workspace is locked."""
         return self._locked
 
+    def size_bytes(self) -> list[int]:
+        """Return scratch capacity for each execution slot."""
+        return [self._workspace_size_bytes(ws) for ws in self._current_workspaces]
+
+    def reserve_sizes(self, sizes: list[int]) -> None:
+        """Restore profiled scratch capacities before capturing any graphs.
+
+        All slots must be reserved before capture: growing scratch afterward
+        would invalidate the addresses held by captured kernels.
+        """
+        if self._locked:
+            raise RuntimeError("Cannot reserve workspace after locking")
+        if len(sizes) != len(self._current_workspaces) or any(s < 0 for s in sizes):
+            raise ValueError("Workspace capacities must match execution slots")
+        for slot, size in enumerate(sizes):
+            if size <= self._workspace_size_bytes(self._current_workspaces[slot]):
+                continue
+            self._current_workspaces[slot] = None
+            self._retained[slot] = None
+            torch.accelerator.empty_cache()
+            with self._alloc_context():
+                self._current_workspaces[slot] = torch.empty(
+                    (size,), dtype=torch.uint8, device=self._device
+                )
+
     def _get_workspace_id(self) -> int:
         lane = _workspace_lane.get()
         if lane >= self._num_lanes:

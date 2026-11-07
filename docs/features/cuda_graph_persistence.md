@@ -11,6 +11,13 @@ enabled. Use the same model, parallelism, software stack, and capture sizes for
 SAVE and LOAD. Foundry requires a wheel matching the Torch minor version and
 CUDA major version; see [Foundry installation](https://github.com/foundry-org/foundry#installation).
 
+The first SAVE records KV profiling state and each rank's scratch workspace
+capacities. Subsequent SAVE and LOAD processes reserve those capacities before
+handling graphs, including the workspace needed by eager prefill. Keep the
+`rank_N_workspace_sizes.json` files alongside `warmup_state.json` when copying
+an archive. Workspace storage stays locked after capture or restore so inference
+cannot replace buffers referenced by archived kernels.
+
 ## Regression and benchmark
 
 Run the dedicated GPU test with Foundry installed:

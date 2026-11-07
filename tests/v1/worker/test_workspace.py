@@ -112,6 +112,30 @@ def test_workspace_lock_blocks_growth_and_unlock_restores(monkeypatch) -> None:
     assert grown.numel() == 512
 
 
+def test_profiled_capacities_restore_all_slots_before_lock(monkeypatch) -> None:
+    active_ubatch = [0]
+    monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: active_ubatch[0])
+    profiled = workspace.WorkspaceManager(torch.device("cpu"), num_ubatches=2)
+    profiled.get_simultaneous(((4096,), torch.uint8))
+    active_ubatch[0] = 1
+    profiled.get_simultaneous(((8192,), torch.uint8))
+
+    restored = workspace.WorkspaceManager(torch.device("cpu"), num_ubatches=2)
+    restored.reserve_sizes(profiled.size_bytes())
+    restored.lock()
+    # A small decode request followed by a larger prefill must share the
+    # preallocated address in each slot, without growing after graph capture.
+    for slot, size in enumerate(profiled.size_bytes()):
+        active_ubatch[0] = slot
+        (decode,) = restored.get_simultaneous(((64,), torch.uint8))
+        (prefill,) = restored.get_simultaneous(((size,), torch.uint8))
+        assert decode.data_ptr() == prefill.data_ptr()
+        with pytest.raises(AssertionError, match="Workspace is locked"):
+            restored.get_simultaneous(((size + 256,), torch.uint8))
+    with pytest.raises(RuntimeError, match="after locking"):
+        restored.reserve_sizes(profiled.size_bytes())
+
+
 def test_workspace_lane_validation(monkeypatch) -> None:
     monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: 0)
     manager = workspace.WorkspaceManager(torch.device("cpu"), num_lanes=1)

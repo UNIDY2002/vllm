@@ -84,7 +84,12 @@ class _LoggedServer(RemoteOpenAIServer):
             env.update(env_dict)
         # Pin the server to this checkout.  The venv can contain an older
         # editable vLLM, which would silently bypass the adapter under test.
-        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
+        env["PYTHONPATH"] = os.pathsep.join(
+            filter(
+                None,
+                [str(Path(__file__).resolve().parents[3]), env.get("PYTHONPATH")],
+            )
+        )
         self._log_file = self._log_path.open("w", encoding="utf-8")
         self.proc = subprocess.Popen(
             [

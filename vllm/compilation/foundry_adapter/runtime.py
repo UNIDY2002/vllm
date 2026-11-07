@@ -439,6 +439,29 @@ def _eager_inductor_lazy_init(device: torch.device) -> None:
         log.debug("[foundry] joint_graph.lazy_init(%s) skipped: %s", device, e)
 
 
+def prepare_worker_workspace() -> None:
+    """Replay the profiling high-water mark without running model forwards."""
+    from vllm.v1.worker.workspace import current_workspace_manager
+
+    cfg = get_config()
+    assert cfg is not None and cfg.workspace_dir is not None
+    # SAVE replaces rank_N's graph archive each pass. Keep profiling metadata
+    # beside warmup_state.json so the deterministic second SAVE can reuse it.
+    rank_name = Path(cfg.workspace_dir).name
+    path = Path(cfg.workspace_root) / f"{rank_name}_workspace_sizes.json"
+    manager = current_workspace_manager()
+    if path.exists():
+        sizes = json.loads(path.read_text())
+        manager.reserve_sizes(sizes)
+        log.info("[foundry] restored profiled workspace capacities: %s", sizes)
+    elif get_graph_extension_mode() == CUDAGraphExtensionMode.LOAD:
+        raise RuntimeError(f"Foundry archive lacks {path.name}; repeat SAVE")
+    else:
+        sizes = manager.size_bytes()
+        path.write_text(json.dumps(sizes))
+        log.info("[foundry] saved profiled workspace capacities: %s", sizes)
+
+
 def prepare_graph_capture(
     metadata_builders: list | None = None,
     device: torch.device | None = None,

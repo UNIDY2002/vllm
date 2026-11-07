@@ -398,7 +398,7 @@ def _patch_profile_cudagraph_memory() -> None:
 #   orig:      runs on both SAVE and LOAD. On LOAD each CUDAGraphWrapper.__call__
 #              dispatches to capture_or_load_graph → finish_one_graph_load.
 #   post-orig: SAVE → save_graph_manifest + pack_fatbins + capture_final_alloc_offset
-#              LOAD → unlock_workspace (allow inference growth)
+#              LOAD → empty cached allocator segments
 #              both → stop_allocation_region (post-capture allocs use the
 #                     standard CUDA allocator; only captured-graph memory
 #                     needs the deterministic VMM region)
@@ -447,6 +447,7 @@ def _patch_capture_model() -> None:
                 for ag in ag_list
                 for b in ag.metadata_builders
             ]
+            rt.prepare_worker_workspace()
             rt.prepare_graph_capture(
                 metadata_builders=builders,
                 device=self.device,
@@ -474,11 +475,6 @@ def _patch_capture_model() -> None:
                 save_graph_manifest()
                 pack_fatbins()
             elif mode == CUDAGraphExtensionMode.LOAD:
-                # NOTE(liuxs): see if there is better way to handle it
-                from vllm.v1.worker.workspace import unlock_workspace
-
-                unlock_workspace()
-                log.info("[foundry] unlocked workspace (allow growth at inference)")
                 # Restored graphs are rebuilt by Foundry at the driver level;
                 # unlike a native torch graph pool, the caching allocator does
                 # not know which cached-but-free segments are still referenced
