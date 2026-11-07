@@ -138,6 +138,16 @@ def install_hooks(compilation_config: CompilationConfig) -> None:
         _INSTALLED = True
         return
 
+    from vllm.config import CompilationMode
+
+    # LOAD reconstructs CUDA kernels without rebuilding the Torch compiled
+    # model. Keep SAVE's uncaptured forwards (notably prefill) on that same
+    # path: compiled SAVE and uncompiled LOAD can select different kernels
+    # and produce different tokens before the restored decode graph runs.
+    # FULL CUDA graphs remain enabled independently of Torch compilation.
+    compilation_config.mode = CompilationMode.NONE
+    log.info("[foundry] disabled Torch compilation for both SAVE and LOAD")
+
     # Disable the extra forward so SAVE and LOAD use the same graph-wrapper
     # path.
     compilation_config.cudagraph_num_of_warmups = 0
@@ -618,12 +628,7 @@ def _patch_cuda_graph_wrapper_call() -> None:
                 f"descriptor={bd}, expected={entry.input_addresses}, "
                 f"got={replay_input_addresses}"
             )
-        log.info(
-            "[foundry] replay wrapper graph descriptor=%s inputs=%s output=%s",
-            bd,
-            replay_input_addresses,
-            entry.output,
-        )
+        log.debug("[foundry] replay wrapper graph descriptor=%s", bd)
         entry.cudagraph.replay()
         return entry.output
 

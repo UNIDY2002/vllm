@@ -16,7 +16,7 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import pytest
@@ -56,7 +56,7 @@ PROMPTS = [
 class RunResult:
     name: str
     startup_seconds: float
-    restore_seconds: float
+    graph_build_seconds: float
     outputs: tuple[str, ...]
     benchmark_seconds: float
     benchmark_output_tokens: int
@@ -87,8 +87,14 @@ class _LoggedServer(RemoteOpenAIServer):
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3])
         self._log_file = self._log_path.open("w", encoding="utf-8")
         self.proc = subprocess.Popen(
-            [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", model,
-             *vllm_serve_args],
+            [
+                sys.executable,
+                "-m",
+                "vllm.entrypoints.cli.main",
+                "serve",
+                model,
+                *vllm_serve_args,
+            ],
             env=env,
             stdout=self._log_file,
             stderr=subprocess.STDOUT,
@@ -126,10 +132,16 @@ def _compilation_config(foundry_config: Path | None) -> str:
     # this test targets the Foundry archive/replay lifecycle for the V1 wrapper
     # graphs and exercises two deterministic decode sizes.
     config = {
+        # Foundry restores driver graphs without rebuilding a Torch compiled
+        # model. Match that kernel path in the native reference as well, while
+        # retaining FULL decode graph capture/replay in every arm.
+        "mode": 0,
         "cudagraph_capture_sizes": CAPTURE_SIZES,
         "cudagraph_mode": "FULL_DECODE_ONLY",
     }
     if foundry_config is not None:
+        # Exercise the adapter's automatic SAVE/LOAD compile-mode pin.
+        config.pop("mode")
         config["graph_extension_config_path"] = str(foundry_config)
     return json.dumps(config)
 
@@ -137,12 +149,8 @@ def _compilation_config(foundry_config: Path | None) -> str:
 def _server_args(foundry_config: Path | None) -> list[str]:
     return [
         "--trust-remote-code",
-        "--tokenizer-mode",
-        "kimi_k3",
         "--dtype",
         "bfloat16",
-        "--quantization",
-        "mxfp4",
         "--skip-mm-profiling",
         "--max-model-len",
         "128",
@@ -174,6 +182,54 @@ def _run_requests(server: _LoggedServer) -> tuple[tuple[str, ...], float, int]:
     return tuple(outputs), time.perf_counter() - start, output_tokens
 
 
+def _run_benchmark(server: _LoggedServer, result_path: Path) -> tuple[float, int]:
+    """Use vLLM's serving benchmark for the steady-state performance gate."""
+    with result_path.with_suffix(".log").open("w", encoding="utf-8") as log:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "vllm.entrypoints.cli.main",
+                "bench",
+                "serve",
+                "--model",
+                MODEL,
+                "--base-url",
+                server.url_root,
+                "--backend",
+                "openai",
+                "--dataset-name",
+                "random",
+                "--random-input-len",
+                "32",
+                "--random-output-len",
+                "32",
+                "--num-prompts",
+                "64",
+                "--max-concurrency",
+                "2",
+                "--num-warmups",
+                "2",
+                "--ignore-eos",
+                "--seed",
+                "0",
+                "--save-result",
+                "--result-dir",
+                str(result_path.parent),
+                "--result-filename",
+                result_path.name,
+            ],
+            check=True,
+            timeout=300,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["completed"] == 64 and result["failed"] == 0, result
+    assert result["total_output_tokens"] == 64 * 32, result
+    return result["duration"], result["total_output_tokens"]
+
+
 def _run_arm(
     name: str,
     foundry_config: Path | None,
@@ -202,8 +258,15 @@ def _run_arm(
                 seed=0,
             )
             assert canary.choices, "canary completion returned no choices"
+            canary_text = canary.choices[0].text
+            if MODEL == "Qwen/Qwen3-0.6B":
+                assert "paris" in canary_text.lower(), canary_text
 
-            outputs, benchmark_seconds, output_tokens = _run_requests(server)
+            outputs, _, _ = _run_requests(server)
+            outputs = (canary_text, *outputs)
+            benchmark_seconds, output_tokens = _run_benchmark(
+                server, log_path.with_name(f"{name}-benchmark.json")
+            )
     except Exception as exc:
         log_tail = ""
         if log_path.exists():
@@ -213,11 +276,15 @@ def _run_arm(
         ) from exc
 
     log_text = log_path.read_text(encoding="utf-8")
-    restore_seconds = 0.0
+    graph_build_seconds = 0.0
     if name == "load":
-        match = re.search(r"start_graph_builds returned in ([0-9.]+)s", log_text)
-        assert match, "LOAD did not start Foundry graph builds"
-        restore_seconds = float(match.group(1))
+        # start_graph_builds only schedules background work; its return time
+        # is not the time spent reconstructing and instantiating the graphs.
+        match = re.search(r"2 graphs built in ([0-9.]+) ms", log_text)
+        assert match, "LOAD did not finish building the two archived graphs"
+        graph_build_seconds = float(match.group(1)) / 1000
+        assert log_text.count("restored wrapper graph descriptor=") == 2
+        assert "LOAD recapture fallback" not in log_text
         assert "capture_or_load_graph called on LOAD" not in log_text
 
     if name == "save":
@@ -227,7 +294,7 @@ def _run_arm(
     return RunResult(
         name=name,
         startup_seconds=startup_seconds,
-        restore_seconds=restore_seconds,
+        graph_build_seconds=graph_build_seconds,
         outputs=outputs,
         benchmark_seconds=benchmark_seconds,
         benchmark_output_tokens=output_tokens,
@@ -258,6 +325,16 @@ def test_foundry_native_save_load_round_trip_and_benchmark(tmp_path: Path):
     save = _run_arm("save", save_config, log_root / "save-pass2.log", workspace)
     load = _run_arm("load", load_config, log_root / "load.log", workspace)
 
+    # Preserve metrics and exact outputs even when the parity gate fails.
+    (log_root / "results.json").write_text(
+        json.dumps(
+            [asdict(result) for result in (native, save, load)],
+            indent=2,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
+
     # The full fixed workload is the correctness contract, not only the canary.
     assert save.outputs == native.outputs
     assert load.outputs == native.outputs
@@ -268,7 +345,7 @@ def test_foundry_native_save_load_round_trip_and_benchmark(tmp_path: Path):
         "Foundry persistence benchmark: "
         f"startup native/save/load={native.startup_seconds:.2f}/"
         f"{save.startup_seconds:.2f}/{load.startup_seconds:.2f}s, "
-        f"restore={load.restore_seconds:.3f}s, "
+        f"graph build={load.graph_build_seconds:.3f}s, "
         f"output tok/s native/load={native_rate:.2f}/{load_rate:.2f}"
     )
 
